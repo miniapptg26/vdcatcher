@@ -7,15 +7,21 @@
 <title>ВЕЙП ДЕД · Башня</title>
 <link rel="stylesheet" href="styles.css">
 </head>
-<body>
+<body data-skin="neon">
 <div class="app">
   <header class="hud">
     <div class="hud-left">
-      <div class="score-label">СЛОЁВ</div>
-      <div class="score-value" id="score">0</div>
+      <div class="score-box">
+        <div class="score-label">СЛОЁВ</div>
+        <div class="score-value" id="score">0</div>
+      </div>
     </div>
     <div class="hud-title">ВЕЙП&nbsp;ДЕД</div>
     <div class="hud-right">
+      <div class="score-box">
+        <div class="score-label">РЕКОРД</div>
+        <div class="score-value best" id="best">0</div>
+      </div>
       <button class="icon-btn" id="muteBtn" aria-label="Звук">🔊</button>
     </div>
   </header>
@@ -37,6 +43,10 @@
       <h1>БАШНЯ</h1>
       <p class="greet" id="greet"></p>
       <p class="rules">Лови коробки жидкости и строй башню выше всех. Тап — сброс коробки. Чем выше, тем быстрее.</p>
+      <div class="skin-block">
+        <div class="skin-label">СКИН КОРОБОК</div>
+        <div class="skin-picker" id="skinPicker"></div>
+      </div>
       <button class="big-btn" id="startBtn">ИГРАТЬ</button>
     </div>
   </section>

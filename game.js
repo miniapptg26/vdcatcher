@@ -1,10 +1,20 @@
 'use strict';
 
 /* ================= ЧИСТАЯ ЛОГИКА (тестируется в node) ================= */
-var CUBE = 90;            // размер коробки, мировые px
-var GAME_WIDTH = 540;     // ширина игровой площадки
-var BOUND = GAME_WIDTH / 2 - CUBE / 2; // 225 — границы движения по X/Z
-var AXIS_SWITCH = 6;      // каждые N слоёв ось движения меняется
+var CUBE = 90;
+var GAME_WIDTH = 540;
+var BOUND = GAME_WIDTH / 2 - CUBE / 2;
+var AXIS_SWITCH = 6;
+var MAX_DEBRIS = 22;
+
+var SKINS = [
+  { id: 'neon',    name: 'Неон',    emoji: '💜' },
+  { id: 'classic', name: 'Классика', emoji: '📦' },
+  { id: 'hyper',   name: 'Хайп',    emoji: '⚡' },
+  { id: 'metal',   name: 'Металл',  emoji: '🪙' }
+];
+
+var SKIN_IDS = SKINS.map(function (s) { return s.id; });
 
 var FLAVORS = [
   { name: 'МЯТА',      c1: '#14c9ae', c2: '#0b7f6b', ct: '#b8f7e2', cd: '#084b41' },
@@ -15,16 +25,10 @@ var FLAVORS = [
   { name: 'ЛИМОН',     c1: '#ffd94a', c2: '#d49a00', ct: '#fff3c0', cd: '#8f6200' }
 ];
 
-function flavorFor(level) {
-  return FLAVORS[Math.floor(level / 3) % FLAVORS.length];
-}
-function speedFor(level) {
-  return Math.min(3.4 + level * 0.16, 9.2);
-}
-function axisFor(level) {
-  return Math.floor(level / AXIS_SWITCH) % 2 === 0 ? 'x' : 'z';
-}
-/* Перекрытие интервалов [a, a+sa] и [b, b+sb]; null если нет пересечения */
+function clamp(v, min, max) { return v < min ? min : (v > max ? max : v); }
+function flavorFor(level) { return FLAVORS[Math.floor(level / 3) % FLAVORS.length]; }
+function speedFor(level) { return Math.min(3.4 + level * 0.16, 9.2); }
+function axisFor(level) { return Math.floor(level / AXIS_SWITCH) % 2 === 0 ? 'x' : 'z'; }
 function overlap1d(a, sa, b, sb) {
   var lo = Math.max(a, b);
   var hi = Math.min(a + sa, b + sb);
@@ -34,39 +38,43 @@ function overlap1d(a, sa, b, sb) {
 
 /* Экспорт для node-тестов */
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { CUBE: CUBE, GAME_WIDTH: GAME_WIDTH, BOUND: BOUND, AXIS_SWITCH: AXIS_SWITCH, FLAVORS: FLAVORS, flavorFor: flavorFor, speedFor: speedFor, axisFor: axisFor, overlap1d: overlap1d };
+  module.exports = { CUBE: CUBE, GAME_WIDTH: GAME_WIDTH, BOUND: BOUND, AXIS_SWITCH: AXIS_SWITCH, MAX_DEBRIS: MAX_DEBRIS, SKINS: SKINS, SKIN_IDS: SKIN_IDS, FLAVORS: FLAVORS, clamp: clamp, flavorFor: flavorFor, speedFor: speedFor, axisFor: axisFor, overlap1d: overlap1d };
 }
 
 /* ================= БРАУЗЕРНАЯ ЧАСТЬ ================= */
 if (typeof window !== 'undefined') {
-  window.addEventListener('load', function () { initGame(); });
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initGame);
+  } else {
+    initGame();
+  }
 }
 
 var scene, camera, hudScore, tapHint, perfect;
 var state = 'menu', level = 0, best = 0;
-var stack = [];       // слои {x, z, sx, sz, y}
-var moving = null;    // {el, x, z, sx, sz, y, dir, speed}
-var debris = [];      // {el, x, y, z, vx, vy, vrx, vrz, rotX, rotZ, life}
+var stack = [];
+var moving = null;
+var debris = [];
 var camY = 40, camYTarget = 40;
 var busy = false, rafId = 0, lastT = 0;
-var sfx = null, muted = loadMuted();
+var sfx = null, muted = loadMuted(), skinId = loadSkin();
 
 function $(id) { return document.getElementById(id); }
 
-function loadMuted() {
-  try { return localStorage.getItem('vapeded_muted') === '1'; } catch (e) { return false; }
+function loadBest() { try { return parseInt(localStorage.getItem('vapeded_best') || '0', 10) || 0; } catch (e) { return 0; } }
+function saveBest() { try { localStorage.setItem('vapeded_best', String(best)); } catch (e) { /* ignore */ } }
+function loadMuted() { try { return localStorage.getItem('vapeded_muted') === '1'; } catch (e) { return false; } }
+function loadSkin() {
+  try {
+    var v = localStorage.getItem('vapeded_skin');
+    return SKIN_IDS.indexOf(v) >= 0 ? v : 'neon';
+  } catch (e) { return 'neon'; }
 }
-function saveBest() {
-  try { localStorage.setItem('vapeded_best', String(best)); } catch (e) { /* ignore */ }
-}
-function loadBest() {
-  try { return parseInt(localStorage.getItem('vapeded_best') || '0', 10) || 0; } catch (e) { return 0; }
-}
+function saveSkin(id) { try { localStorage.setItem('vapeded_skin', id); } catch (e) { /* ignore */ } }
 
 /* ---------- Звук (Web Audio, без файлов) ---------- */
 function Sfx() {
   this.ctx = null;
-  var self = this;
   this.ensure = function () {
     if (!this.ctx) {
       var AC = window.AudioContext || window.webkitAudioContext;
@@ -150,12 +158,18 @@ function makeCube(w, d, flavor, cls) {
   return cube;
 }
 
-/* ---------- Позиционирование слоя ---------- */
 function placeLayer(el, x, y, z) {
   el.style.transform = 'translate3d(' + x + 'px,' + y + 'px,' + z + 'px)';
 }
 
-/* ---------- Спавн базы и движущейся коробки ---------- */
+function clearScene() {
+  while (camera.firstChild) camera.removeChild(camera.firstChild);
+  camera.appendChild($('podium'));
+  camera.appendChild($('glow'));
+  stack = []; debris = []; moving = null;
+}
+
+/* ---------- Спавн ---------- */
 function spawnBase() {
   var f = flavorFor(0);
   var el = makeCube(CUBE, CUBE, f, '');
@@ -172,23 +186,23 @@ function spawnMoving() {
   var axis = axisFor(level);
   var prev = stack[stack.length - 1];
   var dir = Math.random() < 0.5 ? 1 : -1;
-  var s = f.sx, s2 = f.sz;
   var x = prev.x, z = prev.z;
   if (axis === 'x') {
     x = prev.x + dir * 150;
-    if (x < -BOUND) x = -BOUND;
-    if (x > BOUND - CUBE + 0.01) x = BOUND - CUBE;
+    x = clamp(x, -BOUND, BOUND - CUBE);
   } else {
     z = prev.z + dir * 150;
-    if (z < -BOUND) z = -BOUND;
-    if (z > BOUND - CUBE + 0.01) z = BOUND - CUBE;
+    z = clamp(z, -BOUND, BOUND - CUBE);
   }
   moving = { el: el, x: x, z: z, sx: CUBE, sz: CUBE, dir: dir, speed: speedFor(level), y: (level + 1) * CUBE + CUBE * 1.6 };
   placeLayer(el, x, moving.y, z);
 }
 
-/* ---------- Обломки ---------- */
 function spawnDebris(x, z, w, d, y, vy) {
+  if (debris.length >= MAX_DEBRIS) {
+    var old = debris.shift();
+    if (old && old.el.parentNode) camera.removeChild(old.el);
+  }
   var f = flavorFor(level);
   var el = makeCube(w, d, f, 'debris');
   camera.appendChild(el);
@@ -202,29 +216,58 @@ function spawnDebris(x, z, w, d, y, vy) {
   });
 }
 
+/* ---------- Скины ---------- */
+function renderSkins() {
+  var picker = $('skinPicker');
+  if (!picker) return;
+  picker.innerHTML = '';
+  for (var i = 0; i < SKINS.length; i++) {
+    var s = SKINS[i];
+    var btn = document.createElement('button');
+    btn.className = 'skin-btn' + (s.id === skinId ? ' active' : '');
+    btn.type = 'button';
+    btn.dataset.skin = s.id;
+    var em = document.createElement('span');
+    em.className = 'skin-emoji';
+    em.textContent = s.emoji;
+    var nm = document.createElement('span');
+    nm.className = 'skin-name';
+    nm.textContent = s.name;
+    btn.appendChild(em);
+    btn.appendChild(nm);
+    btn.addEventListener('click', function () { setSkin(this.dataset.skin); });
+    picker.appendChild(btn);
+  }
+}
+
+function setSkin(id) {
+  if (SKIN_IDS.indexOf(id) < 0) id = 'neon';
+  skinId = id;
+  document.body.dataset.skin = id;
+  saveSkin(id);
+  var btns = document.querySelectorAll('.skin-btn');
+  for (var i = 0; i < btns.length; i++) {
+    btns[i].className = 'skin-btn' + (btns[i].dataset.skin === id ? ' active' : '');
+  }
+  if (sfx) sfx.click();
+}
+
 /* ---------- Игровые действия ---------- */
 function startGame() {
   state = 'playing';
   level = 0;
-  stack = [];
-  debris = [];
   busy = false;
   camY = 40; camYTarget = 40;
-  while (camera.firstChild) camera.removeChild(camera.firstChild);
-  camera.appendChild($('podium'));
-  camera.appendChild($('glow'));
+  clearScene();
   spawnBase();
   $('score').textContent = '0';
   $('tapHint').classList.remove('hidden');
   $('startOverlay').classList.add('hidden');
   $('overOverlay').classList.add('hidden');
   spawnMoving();
-  hudScore = $('score');
 }
 
-function camTarget() {
-  return level * CUBE * 0.848 + 40;
-}
+function camTarget() { return level * CUBE * 0.848 + 40; }
 
 function drop() {
   if (state !== 'playing' || busy || !moving) return;
@@ -252,27 +295,23 @@ function place() {
   var prev = stack[stack.length - 1];
   var axis = axisFor(level);
   var newY = (level + 1) * CUBE;
-  var ok = true, ov = null, pieceStart = 0, pieceSize = 0, nx = prev.x, nz = prev.z, nsx = prev.sx, nsz = prev.sz;
+  var ov = null, pieceStart = 0, pieceSize = 0, nx = prev.x, nz = prev.z, nsx = prev.sx, nsz = prev.sz;
 
   if (axis === 'x') {
     ov = overlap1d(moving.x, CUBE, prev.x, prev.sx);
-    if (!ov) { ok = false; } else {
-      nx = ov.start; nsx = ov.size; nz = prev.z; nsz = prev.sz;
-      pieceSize = CUBE - ov.size;
-      pieceStart = moving.x < ov.start ? ov.start + ov.size : ov.start - pieceSize;
-      if (pieceStart < moving.x) pieceStart = moving.x;
-    }
+    if (!ov) { gameOver(); return; }
+    nx = ov.start; nsx = ov.size;
+    pieceSize = CUBE - ov.size;
+    pieceStart = moving.x < ov.start ? ov.start + ov.size : ov.start - pieceSize;
+    if (pieceStart < moving.x) pieceStart = moving.x;
   } else {
     ov = overlap1d(moving.z, CUBE, prev.z, prev.sz);
-    if (!ov) { ok = false; } else {
-      nz = ov.start; nsz = ov.size; nx = prev.x; nsx = prev.sx;
-      pieceSize = CUBE - ov.size;
-      pieceStart = moving.z < ov.start ? ov.start + ov.size : ov.start - pieceSize;
-      if (pieceStart < moving.z) pieceStart = moving.z;
-    }
+    if (!ov) { gameOver(); return; }
+    nz = ov.start; nsz = ov.size;
+    pieceSize = CUBE - ov.size;
+    pieceStart = moving.z < ov.start ? ov.start + ov.size : ov.start - pieceSize;
+    if (pieceStart < moving.z) pieceStart = moving.z;
   }
-
-  if (!ok) { gameOver(); return; }
 
   var flavor = flavorFor(level);
   var el = makeCube(nsx, nsz, flavor, '');
@@ -284,7 +323,11 @@ function place() {
 
   if (pieceSize > 2) {
     var py = newY - CUBE * 0.5;
-    spawnDebris(pieceStart, axis === 'x' ? nz : nx, pieceSize, axis === 'x' ? nsz : nsx, py, 200 + Math.random() * 90);
+    var dx = axis === 'x' ? pieceStart : nx;
+    var dz = axis === 'x' ? nz : pieceStart;
+    var dw = axis === 'x' ? pieceSize : nsx;
+    var dd = axis === 'x' ? nsz : pieceSize;
+    spawnDebris(dx, dz, dw, dd, py, 200 + Math.random() * 90);
     sfx.noise(0.12, 0.08, 1100);
   }
   var perfectHit = pieceSize <= 2;
@@ -320,7 +363,8 @@ function gameOver() {
   setTimeout(function () {
     $('finalScore').textContent = String(level);
     $('finalBest').textContent = String(best);
-    $('score').textContent = String(level);
+    var bestEl = $('best');
+    if (bestEl) bestEl.textContent = String(best);
     $('tapHint').classList.add('hidden');
     $('overOverlay').classList.remove('hidden');
     $('overOverlay').classList.add('fade-in');
@@ -339,10 +383,8 @@ function showPerfect() {
 
 function toMenu() {
   state = 'menu';
-  while (camera.firstChild) camera.removeChild(camera.firstChild);
-  camera.appendChild($('podium'));
-  camera.appendChild($('glow'));
-  stack = []; debris = []; moving = null;
+  clearScene();
+  spawnBase();
   camY = 40; camYTarget = 40;
   $('overOverlay').classList.add('hidden');
   $('startOverlay').classList.remove('hidden');
@@ -353,14 +395,13 @@ function toMenu() {
 /* ---------- Главный цикл ---------- */
 function frame(ts) {
   rafId = requestAnimationFrame(frame);
+  if (document.hidden) { lastT = ts; return; }
   var dt = lastT ? Math.min((ts - lastT) / 1000, 0.05) : 0.016;
   lastT = ts;
 
-  // камера
   camY += (camYTarget - camY) * 0.12;
   camera.style.transform = 'translateY(' + camY.toFixed(1) + 'px) rotateX(-32deg)';
 
-  // движущаяся коробка
   if (state === 'playing' && !busy && moving) {
     var axis = axisFor(level);
     if (axis === 'x') {
@@ -375,7 +416,6 @@ function frame(ts) {
     placeLayer(moving.el, moving.x, moving.y, moving.z);
   }
 
-  // обломки
   for (var i = debris.length - 1; i >= 0; i--) {
     var d = debris[i];
     d.vy += 1500 * dt;
@@ -386,7 +426,7 @@ function frame(ts) {
     d.rotZ += d.vrz * dt;
     d.el.style.transform = 'translate3d(' + d.x + 'px,' + d.y + 'px,' + d.z + 'px) rotateX(' + d.rotX.toFixed(1) + 'deg) rotateZ(' + d.rotZ.toFixed(1) + 'deg)';
     if (d.y > 1900 || d.life-- < -120) {
-      camera.removeChild(d.el);
+      if (d.el.parentNode) camera.removeChild(d.el);
       debris.splice(i, 1);
     }
   }
@@ -401,11 +441,12 @@ function initGame() {
   perfect = $('perfect');
   sfx = new Sfx();
   best = loadBest();
-  $('best').textContent = String(best);
 
-  // приветствие из initData Telegram (без бэкенда, просто показ имени)
+  renderSkins();
+  setSkin(skinId);
+
   try {
-    var params = new URLSearchParams(location.search);
+    var params = new URLSearchParams(window.location.search);
     var userRaw = params.get('user');
     if (userRaw) {
       var user = JSON.parse(decodeURIComponent(userRaw));
@@ -413,8 +454,8 @@ function initGame() {
     }
   } catch (e) { /* ignore */ }
 
-  $('muteBtn').textContent = muted ? '🔇' : '🔊';
   $('muteBtn').addEventListener('click', function () {
+    sfx.ensure();
     muted = !muted;
     try { localStorage.setItem('vapeded_muted', muted ? '1' : '0'); } catch (e) { /* ignore */ }
     $('muteBtn').textContent = muted ? '🔇' : '🔊';
@@ -423,14 +464,24 @@ function initGame() {
   $('restartBtn').addEventListener('click', function () { sfx.ensure(); startGame(); });
   $('menuBtn').addEventListener('click', toMenu);
 
-  scene.addEventListener('pointerdown', function (e) {
-    if (e.target.closest('.overlay')) return;
+  function onTap(e) {
+    if (e.target && e.target.closest && e.target.closest('.overlay')) return;
     sfx.ensure();
     drop();
-  });
+  }
+  if (window.PointerEvent) {
+    scene.addEventListener('pointerdown', onTap);
+  } else {
+    scene.addEventListener('touchstart', onTap, { passive: false });
+    scene.addEventListener('mousedown', onTap);
+  }
 
   camera.style.transform = 'translateY(40px) rotateX(-32deg)';
-  startGame();
+  clearScene();
+  spawnBase();
+  $('score').textContent = '0';
+  var bestEl = $('best');
+  if (bestEl) bestEl.textContent = String(best);
   lastT = 0;
   rafId = requestAnimationFrame(frame);
 }
