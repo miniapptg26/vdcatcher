@@ -1,6 +1,7 @@
 /*
    ВЕЙП ДЕД · ЖИЖА — 8-бит ретро-мини-игра «поймай жидкость»
-   Дед с бородой и вейпом ловит баночки жидкости.
+   Дед в бордовой кепке с чёрной бородой и вейпом ловит баночки жидкости.
+   Фишки: PERFECT-ловля, ПАР-БОМБА, титулы-ранги.
    Статический Telegram Mini App: HTML + CSS + JS, без сервера.
 */
 'use strict';
@@ -18,6 +19,8 @@ const CONFIG = {
   SLOW_FACTOR: 0.45,
   TURBO_FACTOR: 2.0,
   DANGER_START_LEVEL: 2,
+  PERFECT_X_DIST: 14,      /* точная поимка по центру деда */
+  PERFECT_MULT: 1.25,
   BEST_KEY: 'vapeded_juice_best',
   FLAVORS: [
     { id: 'strawberry', emoji: '🍓', name: 'Клубника', score: 10, weight: 26, color: '#ff4d6d' },
@@ -32,7 +35,16 @@ const CONFIG = {
     { id: 'life', emoji: '❤️', label: '+1 ЖИЗНЬ', duration: 0 },
     { id: 'slow', emoji: '⏳', label: 'ЗАМЕДЛЕНИЕ', duration: 6 },
     { id: 'magnet', emoji: '🧲', label: 'МАГНИТ', duration: 6 },
-    { id: 'turbo', emoji: '⚡', label: 'ТУРБО', duration: 5 }
+    { id: 'turbo', emoji: '⚡', label: 'ТУРБО', duration: 5 },
+    { id: 'bomb', emoji: '💨', label: 'ПАР-БОМБА', duration: 0 }
+  ],
+  TITLES: [
+    { score: 0, title: 'НОВИЧОК' },
+    { score: 300, title: 'ЛАКОМКА' },
+    { score: 800, title: 'ЛОВЕЦ БАНОК' },
+    { score: 1600, title: 'ГРОЗА ОКУРКОВ' },
+    { score: 2800, title: 'МАСТЕР ПАРА' },
+    { score: 4500, title: 'ЛЕГЕНДА ЖИЖИ' }
   ],
   WEIGHTS: { flavor: 90, golden: 4, danger: 8, bonus: 6 }
 };
@@ -52,6 +64,15 @@ const GameCore = {
     return Math.min(1 + Math.floor(combo / CONFIG.COMBO_STEP) * 0.5, CONFIG.COMBO_MAX_MULT);
   },
   roundScore(raw) { return Math.max(1, Math.round(raw)); },
+  titleFor(score) {
+    let t = CONFIG.TITLES[0];
+    for (const e of CONFIG.TITLES) if (score >= e.score) t = e;
+    return t.title;
+  },
+  nextTitleGap(score) {
+    for (const e of CONFIG.TITLES) if (e.score > score) return e.score - score;
+    return 0;
+  },
   collidesRectCircle(rx, ry, rw, rh, cx, cy, cr) {
     const nx = this.clamp(cx, rx, rx + rw);
     const ny = this.clamp(cy, ry, ry + rh);
@@ -93,9 +114,10 @@ const PAL = {
   bg: '#10162a', bg2: '#16203f', star: '#e8f0ff',
   white: '#e8f0ff', yellow: '#ffd800', red: '#e8464c',
   green: '#3ddc7a', blue: '#4ec3e8', orange: '#ff9d00',
-  skin: '#ffc98a', skin2: '#e8a860', beard: '#e8e8e8', beard2: '#c8c8c8',
+  skin: '#ffc98a', skin2: '#e8a860',
+  beard: '#2b2b2b', beard2: '#171717',
   coat: '#2a3a78', coatD: '#1c2850', boot: '#3a2a1a', black: '#141414',
-  cap: '#e8464c', capD: '#c43a40'
+  cap: '#7a1f2e', capD: '#5a1622', vizor: '#1c2444', vizorEdge: '#3c4f96'
 };
 
 function run() {
@@ -107,6 +129,7 @@ function run() {
   const elFinal = $('final-score'), elBest = $('best-score'), elNewBest = $('new-best');
   const elGreeting = $('greeting');
   const elStartBest = $('start-best');
+  const elStartRank = $('start-rank'), elOverRank = $('over-rank');
 
   initTelegram(elGreeting);
 
@@ -115,12 +138,13 @@ function run() {
     score: 0, lives: CONFIG.LIVES, combo: 0, level: 1,
     time: 0, spawnTimer: 700,
     player: { x: (CONFIG.W - CONFIG.PLAYER_W) / 2, targetX: (CONFIG.W - CONFIG.PLAYER_W) / 2 },
-    drops: [], particles: [], stars: [],
+    drops: [], particles: [], popups: [], stars: [],
     bonuses: { slowTill: 0, magnetTill: 0, turboTill: 0 },
     best: 0, shake: 0, overReady: false
   };
   try { S.best = Number(localStorage.getItem(CONFIG.BEST_KEY) || 0); } catch (e) { S.best = 0; }
   elStartBest.textContent = S.best;
+  updateRanks();
   for (let i = 0; i < 60; i++) {
     S.stars.push({ x: Math.floor(Math.random() * CONFIG.W), y: Math.floor(Math.random() * CONFIG.H), s: (Math.random() < 0.3 ? 2 : 1), sp: 6 + Math.random() * 14 });
   }
@@ -166,6 +190,10 @@ function run() {
     o.start(); o.stop(a.currentTime + dur + 0.02);
   }
   const sfxCatch = () => { sfx(540 + Math.random() * 120, 0.07, 'square', 0.06); };
+  const sfxPerfect = () => {
+    sfx(880, 0.09, 'square', 0.07);
+    setTimeout(() => sfx(1174, 0.12, 'square', 0.07), 90);
+  };
   const sfxGolden = () => {
     sfx(660, 0.09, 'square', 0.06);
     setTimeout(() => sfx(880, 0.09, 'square', 0.06), 80);
@@ -173,6 +201,7 @@ function run() {
   };
   const sfxMiss = () => sfx(220, 0.18, 'sawtooth', 0.08, 90);
   const sfxDanger = () => sfx(140, 0.22, 'sawtooth', 0.1, 60);
+  const sfxBomb = () => { sfx(90, 0.22, 'sawtooth', 0.1, 40); setTimeout(() => sfx(70, 0.18, 'sawtooth', 0.09, 35), 120); };
   const sfxBonus = () => {
     sfx(660, 0.08, 'triangle', 0.08);
     setTimeout(() => sfx(990, 0.1, 'triangle', 0.08), 90);
@@ -187,6 +216,10 @@ function run() {
     elBanner.classList.add('show');
     clearTimeout(bannerTimer);
     bannerTimer = setTimeout(() => elBanner.classList.remove('show'), ms || 1400);
+  }
+
+  function pushPopup(text, x, y, color) {
+    S.popups.push({ text, x, y, vx: (Math.random() - 0.5) * 10, color: color || PAL.white, life: 1.0, max: 1.0 });
   }
 
   function spawnDrop() {
@@ -226,21 +259,37 @@ function run() {
   function catchDrop(d) {
     const idx = S.drops.indexOf(d);
     if (idx >= 0) S.drops.splice(idx, 1);
+    const cx = S.player.x + CONFIG.PLAYER_W / 2;
     if (d.kind === 'flavor') {
       S.combo++;
       const mult = GameCore.comboMultiplier(S.combo);
-      const gained = GameCore.roundScore(d.score * mult);
+      let gained = GameCore.roundScore(d.score * mult);
+      const perfect = Math.abs(d.x - cx) < CONFIG.PERFECT_X_DIST;
+      if (perfect) {
+        gained = GameCore.roundScore(gained * CONFIG.PERFECT_MULT);
+        pushPopup('PERFECT!', d.x, d.y - 40, PAL.yellow);
+        burst(d.x, d.y, PAL.white, 6, 120);
+        sfxPerfect();
+      }
       addScore(gained);
+      pushPopup('+' + gained, d.x, d.y - 26, '#e8f0ff');
       burst(d.x, d.y, d.color, 8);
       sfxCatch();
     } else if (d.kind === 'golden') {
       S.combo++;
       const mult = GameCore.comboMultiplier(S.combo);
-      const gained = GameCore.roundScore(d.score * mult);
+      let gained = GameCore.roundScore(d.score * mult);
+      const perfect = Math.abs(d.x - cx) < CONFIG.PERFECT_X_DIST;
+      if (perfect) {
+        gained = GameCore.roundScore(gained * CONFIG.PERFECT_MULT);
+        pushPopup('PERFECT!', d.x, d.y - 44, PAL.yellow);
+        sfxPerfect();
+      }
       addScore(gained);
+      pushPopup('+' + gained, d.x, d.y - 40, PAL.yellow);
       burst(d.x, d.y, '#ffc800', 14, 140);
       sfxGolden();
-      showBanner('✨ +' + gained, 900);
+      showBanner('✨ ЗОЛОТАЯ!', 900);
     } else if (d.kind === 'danger') {
       S.lives--; S.combo = 0;
       S.shake = 0.45;
@@ -248,9 +297,31 @@ function run() {
       sfxDanger();
       if (S.lives <= 0) { gameOver(); return; }
     } else if (d.kind === 'bonus') {
-      applyBonus(d.bonus);
+      if (d.bonus && d.bonus.id === 'bomb') bombBlast();
+      else applyBonus(d.bonus);
     }
     updateHUD();
+  }
+
+  function bombBlast() {
+    let n = 0, sum = 0;
+    for (let i = S.drops.length - 1; i >= 0; i--) {
+      const dd = S.drops[i];
+      if (dd.kind === 'danger') {
+        n++; sum += 10;
+        burst(dd.x, dd.y, '#ff9d00', 10, 130);
+        S.drops.splice(i, 1);
+      }
+    }
+    if (n > 0) {
+      addScore(sum);
+      sfxBomb();
+      showBanner('💨 ВЗРЫВ x' + n + '!', 1300);
+      pushPopup('ВЗРЫВ!', S.player.x + CONFIG.PLAYER_W / 2, CONFIG.PLAYER_Y - 26, PAL.orange);
+    } else {
+      showBanner('💨 ПАР-БОМБА', 900);
+      sfxBonus();
+    }
   }
 
   function applyBonus(b) {
@@ -283,12 +354,18 @@ function run() {
     updateHUD();
   }
 
+  function updateRanks() {
+    const t = GameCore.titleFor(S.best);
+    elStartRank.textContent = t;
+    elOverRank.textContent = t;
+  }
+
   function startGame() {
     ac();
     S.state = 'play';
     S.score = 0; S.lives = CONFIG.LIVES; S.combo = 0; S.level = 1;
     S.spawnTimer = 700; S.time = 0;
-    S.drops = []; S.particles = [];
+    S.drops = []; S.particles = []; S.popups = [];
     S.bonuses = { slowTill: 0, magnetTill: 0, turboTill: 0 };
     S.player.x = S.player.targetX = (CONFIG.W - CONFIG.PLAYER_W) / 2;
     screenStart.classList.add('hidden');
@@ -310,6 +387,7 @@ function run() {
     elFinal.textContent = S.score;
     elBest.textContent = S.best;
     elStartBest.textContent = S.best;
+    updateRanks();
     elNewBest.classList.toggle('hidden', !isRecord);
     screenOver.classList.remove('hidden');
     setTimeout(() => { S.overReady = true; }, 250);
@@ -358,7 +436,7 @@ function run() {
       }
     }
 
-    /* пар из вейпа (кончик устройства справа внизу персонажа) */
+    /* пар из вейпа */
     if (Math.random() < dt * 7) {
       S.particles.push({ x: p.x + CONFIG.PLAYER_W - 4, y: CONFIG.PLAYER_Y + 52, vx: 26 + Math.random() * 22, vy: -48 - Math.random() * 32, life: 0.65, max: 0.65, color: 'rgba(232,240,255,0.6)', size: 3 + Math.random() * 3 });
     }
@@ -370,6 +448,14 @@ function run() {
       pt.vx *= (1 - 1.5 * dt);
       pt.vy *= (1 - 1.5 * dt);
       if (pt.life <= 0) S.particles.splice(i, 1);
+    }
+
+    for (let i = S.popups.length - 1; i >= 0; i--) {
+      const pp = S.popups[i];
+      pp.life -= dt;
+      pp.y -= 26 * dt;
+      pp.x += pp.vx * dt;
+      if (pp.life <= 0) S.popups.splice(i, 1);
     }
 
     for (const st of S.stars) {
@@ -402,14 +488,12 @@ function run() {
     ctx.clearRect(0, 0, CONFIG.W, CONFIG.H);
     px(0, 0, CONFIG.W, CONFIG.H, PAL.bg);
 
-    /* звёзды */
     for (const st of S.stars) {
       px(Math.floor(st.x), Math.floor(st.y), st.s, st.s, PAL.star);
     }
 
     if (S.shake > 0) { ctx.save(); ctx.translate(Math.floor((Math.random() - 0.5) * 12), Math.floor((Math.random() - 0.5) * 12)); }
 
-    /* рамка эффекта (магнит/турбо/замедление) */
     if (now < S.bonuses.magnetTill || now < S.bonuses.turboTill || now < S.bonuses.slowTill) {
       let c = PAL.white;
       if (now < S.bonuses.turboTill) c = PAL.yellow;
@@ -424,10 +508,10 @@ function run() {
     drawDrops(now);
     drawPlayer(now);
     drawParticles();
+    drawPopups();
     if (S.shake > 0) ctx.restore();
   }
 
-  /* ---- баночки, бонусы, окурки ---- */
   function drawDrops(now) {
     for (const d of S.drops) {
       ctx.save();
@@ -450,34 +534,26 @@ function run() {
   function drawBottle(d) {
     const c = d.color;
     const isGolden = d.kind === 'golden';
-    /* крышка */
     px(-13, -19, 26, 7, '#3a3f54');
     px(-13, -19, 26, 2, '#5c6378');
     px(-13, -14, 26, 2, PAL.black);
-    /* корпус банки (пиксельные ступеньки плечиков) */
     px(-15, -12, 30, 3, c);
     px(-17, -9, 34, 5, c);
     px(-17, -4, 34, 14, c);
-    /* нижняя тень корпуса */
     px(-17, 9, 34, 2, PAL.black);
-    /* блик слева */
     ctx.globalAlpha = 0.45;
     px(-12, -9, 3, 21, PAL.white);
     ctx.globalAlpha = 1;
-    /* этикетка */
     px(-10, -5, 20, 12, PAL.white);
     px(-10, -5, 20, 1, PAL.black);
     px(-10, 6, 20, 1, PAL.black);
     px(-10, -5, 1, 12, PAL.black);
     px(9, -5, 1, 12, PAL.black);
-    /* полоска вкуса на этикетке */
     px(-8, 1, 16, 3, c);
-    /* эмодзи вкуса */
     ctx.font = '11px serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillText(d.emoji, 0, -1);
-    /* звёздочка у золотой жижи */
     if (isGolden) {
       ctx.font = '10px serif';
       ctx.fillText('✨', 0, 10);
@@ -485,7 +561,6 @@ function run() {
   }
 
   function drawBonus(d) {
-    /* пиксельный квадрат-коробка */
     px(-22, -22, 44, 44, '#1c2444');
     px(-22, -22, 44, 3, PAL.white);
     px(-22, 19, 44, 3, PAL.white);
@@ -499,26 +574,20 @@ function run() {
   }
 
   function drawCigarette() {
-    /* пепел */
     px(-20, -6, 6, 12, '#9aa0b0');
     px(-18, -6, 4, 4, '#6a7080');
-    /* корпус сигареты */
     px(-14, -6, 24, 12, '#f2e3c0');
     px(-14, -6, 24, 3, '#d9c9a0');
-    /* фильтр */
     px(10, -6, 10, 12, '#ffb050');
     px(10, -6, 10, 3, '#ffd080');
-    /* тлеющий кончик у фильтра */
     px(8, -8, 6, 16, '#ff4d4d');
-    /* крестик-маркер */
     px(-4, -12, 8, 2, PAL.red);
     px(-1, -14, 2, 6, PAL.red);
   }
 
-  /* ---- пиксельный дед с бородой и вейпом ---- */
+  /* ---- пиксельный дед: бордовая кепка, чёрная борода, вейп ---- */
   function drawPlayer(now) {
     const x = S.player.x, y = CONFIG.PLAYER_Y;
-    /* тень под ногами */
     px(x + 6, y + 74, 92, 6, 'rgba(0,0,0,0.35)');
     /* кафтан */
     px(x + 8, y + 46, 88, 22, PAL.coat);
@@ -526,53 +595,49 @@ function run() {
     px(x + 8, y + 66, 88, 3, PAL.white);
     px(x + 8, y + 58, 88, 4, PAL.coatD);
     px(x + 46, y + 58, 12, 4, PAL.yellow);
-    /* левая рука (опущена) */
+    /* левая рука */
     px(x + 0, y + 40, 16, 22, PAL.coat);
     px(x + 2, y + 58, 12, 8, PAL.skin);
-    /* правая рука (держит вейп) */
+    /* правая рука с вейпом */
     px(x + 80, y + 34, 20, 18, PAL.coat);
     px(x + 80, y + 34, 20, 3, '#3c4f96');
     px(x + 80, y + 48, 12, 8, PAL.skin);
-    /* вейп-устройство */
     px(x + 88, y + 54, 16, 7, PAL.black);
     px(x + 88, y + 54, 16, 2, '#3a3f54');
     px(x + 100, y + 55, 5, 5, PAL.yellow);
     px(x + 104, y + 59, 4, 2, PAL.red);
-    /* голова (лицо) */
-    px(x + 24, y + 8, 52, 32, PAL.skin);
-    /* белая оторочка шапки */
-    px(x + 20, y + 10, 60, 4, PAL.beard);
-    /* шапка-ушанка */
-    px(x + 20, y + 0, 60, 12, PAL.cap);
-    px(x + 20, y + 0, 60, 3, PAL.capD);
-    /* клапаны ушей */
-    px(x + 8, y + 12, 12, 18, PAL.cap);
-    px(x + 8, y + 12, 12, 4, PAL.beard);
-    px(x + 76, y + 12, 12, 18, PAL.cap);
-    px(x + 76, y + 12, 12, 4, PAL.beard);
-    /* помпон */
-    px(x + 44, y - 4, 8, 6, PAL.beard);
+    /* голова */
+    px(x + 24, y + 14, 52, 36, PAL.skin);
+    /* бордовая кепка */
+    px(x + 22, y + 2, 52, 12, PAL.cap);
+    px(x + 22, y + 2, 52, 3, PAL.capD);
+    px(x + 46, y + 0, 4, 4, PAL.capD);
+    px(x + 34, y + 4, 14, 3, '#8f3344');
+    px(x + 20, y + 14, 56, 3, PAL.capD);
+    /* козырёк */
+    px(x + 18, y + 17, 60, 4, PAL.vizor);
+    px(x + 18, y + 21, 60, 1, PAL.vizorEdge);
     /* брови */
-    px(x + 24, y + 16, 12, 4, PAL.beard);
-    px(x + 60, y + 16, 12, 4, PAL.beard);
+    px(x + 24, y + 24, 12, 4, PAL.beard);
+    px(x + 60, y + 24, 12, 4, PAL.beard);
     /* глаза */
-    px(x + 28, y + 22, 6, 6, PAL.black);
-    px(x + 62, y + 22, 6, 6, PAL.black);
+    px(x + 28, y + 30, 6, 6, PAL.black);
+    px(x + 62, y + 30, 6, 6, PAL.black);
     /* нос */
-    px(x + 46, y + 26, 8, 7, PAL.skin2);
-    /* усы */
-    px(x + 24, y + 33, 52, 6, PAL.beard);
-    px(x + 28, y + 36, 44, 3, PAL.beard2);
-    /* борода */
-    px(x + 20, y + 37, 56, 13, PAL.beard);
-    px(x + 16, y + 41, 8, 10, PAL.beard);
-    px(x + 72, y + 41, 8, 10, PAL.beard);
-    px(x + 24, y + 46, 48, 5, PAL.beard2);
+    px(x + 46, y + 34, 8, 7, PAL.skin2);
+    /* чёрные усы */
+    px(x + 24, y + 40, 52, 5, PAL.beard);
+    px(x + 28, y + 42, 44, 3, PAL.beard2);
+    /* чёрная борода */
+    px(x + 20, y + 44, 56, 14, PAL.beard);
+    px(x + 16, y + 47, 8, 12, PAL.beard);
+    px(x + 72, y + 47, 8, 12, PAL.beard);
+    px(x + 24, y + 53, 48, 6, PAL.beard2);
     /* пряди бороды */
-    px(x + 30, y + 40, 4, 10, PAL.beard2);
-    px(x + 42, y + 42, 4, 9, PAL.beard2);
-    px(x + 54, y + 40, 4, 10, PAL.beard2);
-    px(x + 62, y + 43, 4, 8, PAL.beard2);
+    px(x + 30, y + 45, 4, 12, PAL.beard2);
+    px(x + 42, y + 47, 4, 11, PAL.beard2);
+    px(x + 54, y + 45, 4, 12, PAL.beard2);
+    px(x + 62, y + 48, 4, 10, PAL.beard2);
     /* сапоги */
     px(x + 16, y + 69, 32, 7, PAL.boot);
     px(x + 48, y + 69, 32, 7, PAL.boot);
@@ -588,6 +653,20 @@ function run() {
       ctx.globalAlpha = Math.max(0, pt.life / pt.max);
       ctx.fillStyle = pt.color;
       ctx.fillRect(Math.floor(pt.x - pt.size / 2), Math.floor(pt.y - pt.size / 2), Math.floor(pt.size), Math.floor(pt.size));
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  function drawPopups() {
+    ctx.font = '10px "Press Start 2P","Courier New",monospace';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    for (const pp of S.popups) {
+      ctx.globalAlpha = Math.max(0, pp.life / pp.max);
+      ctx.fillStyle = 'rgba(0,0,0,0.7)';
+      ctx.fillText(pp.text, Math.floor(pp.x) + 1, Math.floor(pp.y) + 1);
+      ctx.fillStyle = pp.color;
+      ctx.fillText(pp.text, Math.floor(pp.x), Math.floor(pp.y));
     }
     ctx.globalAlpha = 1;
   }
